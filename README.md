@@ -11,13 +11,13 @@ Different model families are trained around different tool shapes. As Cursor not
 Install this package into Pi:
 
 ```bash
-pi install pi-model-suitable-tool
+pi install npm:pi-model-suitable-tool
 ```
 
 For project-local installation, use Pi's local settings flag:
 
 ```bash
-pi install -l pi-model-suitable-tools
+pi install -l npm:pi-model-suitable-tools
 ```
 
 ## Behavior
