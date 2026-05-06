@@ -22,10 +22,10 @@ pi install -l npm:pi-model-suitable-tools
 
 ## Behavior
 
-- Claude models get Claude Code style aliases: `Read`, `Edit`, `Write`, `Bash`, `Grep`, `Glob`, `LS`.
-- GPT/Codex models get Codex's default shell shape: `shell_command`, plus `apply_patch`.
-- Alias tools delegate to Pi built-in tools where possible.
-- `apply_patch` is implemented locally with Codex-style patch grammar.
+- ClaudeモデルにはClaude Code風のエイリアス（`Read`、`Edit`、`Write`、`Bash`、`Grep`、`Glob`）が提供されます。
+- GPT/CodexモデルにはCodex標準のシェル形状である`shell_command`と、`apply_patch`が提供されます。
+- エイリアスツールは、可能な限りPiの組み込みツールに委譲します。
+- `apply_patch`は、Codexスタイルのパッチ文法を使ってローカルに実装されています。
 
 ## Development
 

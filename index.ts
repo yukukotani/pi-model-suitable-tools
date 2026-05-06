@@ -28,11 +28,115 @@ import {
   type ModelProfile,
 } from "./src/tool-args";
 
-const CLAUDE_ALIAS_TOOLS = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "LS"];
+const CLAUDE_ALIAS_TOOLS = ["Read", "Edit", "Write", "Bash", "Grep", "Glob"];
 const CODEX_ALIAS_TOOLS = ["shell_command", "apply_patch"];
 const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
-const MANAGED_TOOLS = new Set([...CLAUDE_ALIAS_TOOLS, ...CODEX_ALIAS_TOOLS, ...BUILTIN_TOOLS]);
+const LEGACY_MANAGED_TOOLS = ["LS"];
+const MANAGED_TOOLS = new Set([...CLAUDE_ALIAS_TOOLS, ...CODEX_ALIAS_TOOLS, ...BUILTIN_TOOLS, ...LEGACY_MANAGED_TOOLS]);
 const MAX_BUILTIN_DEFINITIONS = 64;
+
+const CLAUDE_TOOL_DESCRIPTIONS = {
+  Read: "Read a file from the local filesystem.",
+  Edit: "A tool for editing files",
+  Write: "Write a file to the local filesystem.",
+  Bash: "Run shell command",
+  Grep: `A powerful search tool built on ripgrep
+
+  Usage:
+  - ALWAYS use Grep for search tasks. NEVER invoke \`grep\` or \`rg\` as a Bash command. The Grep tool has been optimized for correct permissions and access.
+  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")
+  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx") or type parameter (e.g., "js", "py", "rust")
+  - Output modes: "content" shows matching lines, "files_with_matches" shows only file paths (default), "count" shows match counts
+  - Use Agent tool for open-ended searches requiring multiple rounds
+  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use \`interface\\{\\}\` to find \`interface{}\` in Go code)
+  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like \`struct \\{[\\s\\S]*?field\`, use \`multiline: true\`
+`,
+  Glob: `- Fast file pattern matching tool that works with any codebase size
+- Supports glob patterns like "**/*.js" or "src/**/*.ts"
+- Returns matching file paths sorted by modification time
+- Use this tool when you need to find files by name patterns
+- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead`,
+} as const;
+
+const CODEX_SHELL_COMMAND_DESCRIPTION = `Runs a shell command and returns its output.
+- Always set the \`workdir\` param when using the shell_command function. Do not use \`cd\` unless absolutely necessary.`;
+
+const CODEX_APPLY_PATCH_DESCRIPTION = `## \`apply_patch\`
+
+Use the \`apply_patch\` shell command to edit files.
+Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+May be immediately followed by *** Move to: <new path> if you want to rename the file.
+Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with:
+
+For instructions on [context_before] and [context_after]:
+- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
+- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
+@@ class BaseClass
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+- If a code block is repeated so many times in a class or function such that even a single \`@@\` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple \`@@\` statements to jump to the right context. For instance:
+
+@@ class BaseClass
+@@ 	 def method():
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+The full grammar definition is below:
+Patch := Begin { FileOp } End
+Begin := "*** Begin Patch" NEWLINE
+End := "*** End Patch" NEWLINE
+FileOp := AddFile | DeleteFile | UpdateFile
+AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
+DeleteFile := "*** Delete File: " path NEWLINE
+UpdateFile := "*** Update File: " path NEWLINE [ MoveTo ] { Hunk }
+MoveTo := "*** Move to: " newPath NEWLINE
+Hunk := "@@" [ header ] NEWLINE { HunkLine } [ "*** End of File" NEWLINE ]
+HunkLine := (" " | "-" | "+") text NEWLINE
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with \`+\` even when creating a new file
+- File references can only be relative, NEVER ABSOLUTE.
+
+You can invoke apply_patch like:
+
+\`\`\`
+shell {"command":["apply_patch","*** Begin Patch\\n*** Add File: hello.txt\\n+Hello, world!\\n*** End Patch\\n"]}
+\`\`\`
+`;
 
 type ShellAliasInput = {
   command?: string;
@@ -234,7 +338,7 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
   registerBuiltinAlias(pi, {
     name: "Read",
     label: "Read",
-    description: "Read file contents using Claude Code compatible arguments.",
+    description: CLAUDE_TOOL_DESCRIPTIONS.Read,
     builtinName: "read",
     parameters: Type.Object({
       file_path: Type.String({ description: "Path to the file to read" }),
@@ -247,7 +351,7 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
   registerBuiltinAlias(pi, {
     name: "Edit",
     label: "Edit",
-    description: "Edit a file using Claude Code compatible exact string replacement arguments.",
+    description: CLAUDE_TOOL_DESCRIPTIONS.Edit,
     builtinName: "edit",
     parameters: Type.Object({
       file_path: Type.String({ description: "Path to the file to edit" }),
@@ -265,7 +369,7 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
   registerBuiltinAlias(pi, {
     name: "Write",
     label: "Write",
-    description: "Write file contents using Claude Code compatible arguments.",
+    description: CLAUDE_TOOL_DESCRIPTIONS.Write,
     builtinName: "write",
     parameters: Type.Object({
       file_path: Type.String({ description: "Path to the file to write" }),
@@ -277,7 +381,7 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
   registerBuiltinAlias(pi, {
     name: "Bash",
     label: "Bash",
-    description: "Execute a bash command using Claude Code compatible arguments.",
+    description: CLAUDE_TOOL_DESCRIPTIONS.Bash,
     builtinName: "bash",
     parameters: Type.Object({
       command: Type.String({ description: "Command to execute" }),
@@ -294,7 +398,7 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
   registerBuiltinAlias(pi, {
     name: "Grep",
     label: "Grep",
-    description: "Search file contents using Claude Code compatible arguments.",
+    description: CLAUDE_TOOL_DESCRIPTIONS.Grep,
     builtinName: "grep",
     parameters: Type.Object({
       pattern: Type.String({ description: "Search pattern" }),
@@ -314,7 +418,7 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
   registerBuiltinAlias(pi, {
     name: "Glob",
     label: "Glob",
-    description: "Find files by glob pattern using Claude Code compatible arguments.",
+    description: CLAUDE_TOOL_DESCRIPTIONS.Glob,
     builtinName: "find",
     parameters: Type.Object({
       pattern: Type.String({ description: "Glob pattern" }),
@@ -323,17 +427,6 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
     toArgs: (params) => params,
   });
 
-  registerBuiltinAlias(pi, {
-    name: "LS",
-    label: "LS",
-    description: "List directory contents using Claude Code compatible arguments.",
-    builtinName: "ls",
-    parameters: Type.Object({
-      path: Type.Optional(Type.String({ description: "Directory to list" })),
-      limit: Type.Optional(Type.Number({ description: "Maximum entries" })),
-    }),
-    toArgs: (params) => params,
-  });
 }
 
 async function runShellAlias(
@@ -366,7 +459,7 @@ function registerCodexAliases(pi: ExtensionAPI): void {
     defineTool({
       name: "shell_command",
       label: "shell_command",
-      description: "Execute a shell command using Codex shell_command compatible arguments.",
+      description: CODEX_SHELL_COMMAND_DESCRIPTION,
       parameters: shellParameters,
       renderCall: renderShellAliasCall,
       renderResult: renderShellAliasResult,
@@ -380,7 +473,7 @@ function registerCodexAliases(pi: ExtensionAPI): void {
     defineTool({
       name: "apply_patch",
       label: "apply_patch",
-      description: "Apply a Codex-style patch to files in the current workspace.",
+      description: CODEX_APPLY_PATCH_DESCRIPTION,
       parameters: Type.Object({
         input: Type.String({ description: "Complete patch text, from Begin Patch through End Patch" }),
       }),
@@ -420,7 +513,7 @@ export default function modelSuitableTools(pi: ExtensionAPI): void {
   let baseTools: string[] = [];
 
   pi.on("session_start", (_event, ctx) => {
-    baseTools = pi.getActiveTools().filter((tool) => !CLAUDE_ALIAS_TOOLS.includes(tool) && !CODEX_ALIAS_TOOLS.includes(tool));
+    baseTools = pi.getActiveTools().filter((tool) => !MANAGED_TOOLS.has(tool));
     applyToolProfile(pi, ctx.model, baseTools);
   });
 

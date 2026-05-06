@@ -384,9 +384,9 @@ describe("argument adapters", () => {
 
 describe("tool registration", () => {
   function registeredTools() {
-    const tools: Array<{ name: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }> = [];
+    const tools: Array<{ name: string; description?: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }> = [];
     modelSuitableTools({
-      registerTool(tool: { name: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }) {
+      registerTool(tool: { name: string; description?: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }) {
         tools.push(tool);
       },
       getActiveTools() {
@@ -401,12 +401,33 @@ describe("tool registration", () => {
   test("Claude aliases reuse built-in renderers", () => {
     const tools = registeredTools();
 
-    for (const name of ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "LS"]) {
+    for (const name of ["Read", "Edit", "Write", "Bash", "Grep", "Glob"]) {
       const tool = tools.find((candidate) => candidate.name === name);
       expect(tool?.renderCall).toBeFunction();
       expect(tool?.renderResult).toBeFunction();
     }
+    expect(tools.find((candidate) => candidate.name === "LS")).toBeUndefined();
     expect(tools.find((candidate) => candidate.name === "Edit")?.renderShell).toBe("self");
+  });
+
+  test("aliases use source tool descriptions", () => {
+    const tools = registeredTools();
+    const description = (name: string) => tools.find((candidate) => candidate.name === name)?.description;
+
+    expect(description("Read")).toBe("Read a file from the local filesystem.");
+    expect(description("Edit")).toBe("A tool for editing files");
+    expect(description("Write")).toBe("Write a file to the local filesystem.");
+    expect(description("Bash")).toBe("Run shell command");
+    expect(description("Grep")).toContain("A powerful search tool built on ripgrep");
+    expect(description("Glob")).toBe(`- Fast file pattern matching tool that works with any codebase size
+- Supports glob patterns like "**/*.js" or "src/**/*.ts"
+- Returns matching file paths sorted by modification time
+- Use this tool when you need to find files by name patterns
+- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead`);
+    expect(description("shell_command")).toBe(`Runs a shell command and returns its output.
+- Always set the \`workdir\` param when using the shell_command function. Do not use \`cd\` unless absolutely necessary.`);
+    expect(description("apply_patch")).toContain("Use the `apply_patch` shell command to edit files.");
+    expect(description("apply_patch")).toContain("File references can only be relative, NEVER ABSOLUTE.");
   });
 
   test("Codex aliases only register shell_command and apply_patch", () => {
@@ -444,7 +465,6 @@ describe("tool registration", () => {
     const cases = [
       { name: "Read", args: { file_path: "package.json" }, expected: "Read package.json" },
       { name: "Glob", args: { pattern: "*.ts" }, expected: "Glob *.ts" },
-      { name: "LS", args: { path: "." }, expected: "LS ." },
     ];
 
     for (const item of cases) {
