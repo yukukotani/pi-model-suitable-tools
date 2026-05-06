@@ -4,7 +4,21 @@ Pi Extension that switches model-facing tool names to match the active model fam
 
 ## Motivation
 
-Different model families are trained around different tool shapes. As Cursor notes in [Customizing the harness for different models](https://cursor.com/en-US/blog/continually-improving-agent-harness#customizing-the-harness-for-different-models), giving each model the tool format it already expects can reduce unnecessary reasoning and mistakes. This extension applies that idea to Pi by exposing model-appropriate tool names while keeping the underlying behavior consistent.
+Different model families are trained around different tool shapes. As Cursor notes in [their article](https://cursor.com/en-US/blog/continually-improving-agent-harness#customizing-the-harness-for-different-models), giving each model the tool format it already expects can reduce unnecessary reasoning and mistakes. This extension applies that idea to Pi by exposing model-appropriate tool names while keeping the underlying behavior consistent.
+
+## Usage
+
+Install this package into Pi:
+
+```bash
+pi install pi-model-optimized-tools
+```
+
+For project-local installation, use Pi's local settings flag:
+
+```bash
+pi install -l pi-model-optimized-tools
+```
 
 ## Behavior
 
@@ -12,21 +26,6 @@ Different model families are trained around different tool shapes. As Cursor not
 - GPT/Codex models get Codex's default shell shape: `shell_command`, plus `apply_patch`.
 - Alias tools delegate to Pi built-in tools where possible.
 - `apply_patch` is implemented locally with Codex-style patch grammar.
-- `shell`, `exec_command`, `TodoWrite`, `update_plan`, `Task`, `Agent`, and other tools without a matching Pi default tool are intentionally not registered.
-
-## Usage
-
-Install this package into Pi:
-
-```bash
-pi install ./
-```
-
-For project-local installation, use Pi's local settings flag:
-
-```bash
-pi install -l ./
-```
 
 ## Development
 
