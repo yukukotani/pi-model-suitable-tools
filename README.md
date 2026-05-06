@@ -1,4 +1,4 @@
-# pi-model-optimized-tools
+# pi-model-suitable-tools
 
 Pi Extension that switches model-facing tool names to match the active model family without changing prompts.
 
@@ -11,13 +11,13 @@ Different model families are trained around different tool shapes. As Cursor not
 Install this package into Pi:
 
 ```bash
-pi install pi-model-optimized-tools
+pi install pi-model-suitable-tools
 ```
 
 For project-local installation, use Pi's local settings flag:
 
 ```bash
-pi install -l pi-model-optimized-tools
+pi install -l pi-model-suitable-tools
 ```
 
 ## Behavior

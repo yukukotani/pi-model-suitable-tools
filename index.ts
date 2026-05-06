@@ -413,7 +413,7 @@ function applyToolProfile(pi: ExtensionAPI, model: unknown, baseTools: string[])
   if (!sameTools(active, nextTools)) pi.setActiveTools(nextTools);
 }
 
-export default function modelOptimizedTools(pi: ExtensionAPI): void {
+export default function modelSuitableTools(pi: ExtensionAPI): void {
   registerClaudeAliases(pi);
   registerCodexAliases(pi);
 

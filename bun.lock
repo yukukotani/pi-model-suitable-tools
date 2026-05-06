@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-model-optimized-tools",
+      "name": "pi-model-suitable-tools",
       "devDependencies": {
         "@mariozechner/pi-coding-agent": "^0.73.0",
         "@types/bun": "latest",

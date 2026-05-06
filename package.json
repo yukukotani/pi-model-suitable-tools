@@ -1,5 +1,5 @@
 {
-  "name": "pi-model-optimized-tools",
+  "name": "pi-model-suitable-tools",
   "version": "0.1.0",
   "description": "Pi extension package that adapts tool names to the active model family.",
   "module": "index.ts",

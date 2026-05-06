@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
-import modelOptimizedTools, { applyPatch, parseApplyPatch, prepareApplyPatchArgs, toGrepArgs, toShellCommand } from "./index";
+import modelSuitableTools, { applyPatch, parseApplyPatch, prepareApplyPatchArgs, toGrepArgs, toShellCommand } from "./index";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "pi-model-tools-"));
@@ -143,7 +143,7 @@ describe("argument adapters", () => {
 describe("tool registration", () => {
   function registeredTools() {
     const tools: Array<{ name: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }> = [];
-    modelOptimizedTools({
+    modelSuitableTools({
       registerTool(tool: { name: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }) {
         tools.push(tool);
       },
