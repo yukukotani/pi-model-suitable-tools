@@ -31,10 +31,61 @@ const CODEX_PROFILE_TOOLS = ["shell_command", "apply_patch"];
 const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const MANAGED_TOOLS = new Set([...CLAUDE_ALIAS_TOOLS, ...CODEX_ALIAS_TOOLS, ...BUILTIN_TOOLS]);
 
+type ShellAliasInput = {
+  command?: string | string[];
+  cmd?: string | string[];
+  args?: string[];
+  cwd?: string;
+  workdir?: string;
+  timeout?: number;
+  timeout_ms?: number;
+};
+
+type BashToolDefinition = ReturnType<typeof createBashToolDefinition>;
+type BashRenderCall = NonNullable<BashToolDefinition["renderCall"]>;
+type BashRenderResult = NonNullable<BashToolDefinition["renderResult"]>;
+type BashRenderContext = Parameters<BashRenderCall>[2];
+type BashRenderTheme = Parameters<BashRenderCall>[1];
+type BashRenderResultOptions = Parameters<BashRenderResult>[1];
+type BashRenderResultTheme = Parameters<BashRenderResult>[2];
+
+const bashRenderDefinitions = new Map<string, BashToolDefinition>();
+
 function timeoutSeconds(input: { timeout?: number; timeout_ms?: number }): number | undefined {
   if (typeof input.timeout === "number") return input.timeout;
   if (typeof input.timeout_ms === "number") return Math.max(1, Math.ceil(input.timeout_ms / 1000));
   return undefined;
+}
+
+function getBashRenderDefinition(cwd: string): BashToolDefinition {
+  const existing = bashRenderDefinitions.get(cwd);
+  if (existing) return existing;
+  const definition = createBashToolDefinition(cwd);
+  bashRenderDefinitions.set(cwd, definition);
+  return definition;
+}
+
+function toBashRenderArgs(input: ShellAliasInput): { command: string; timeout?: number } {
+  return { command: toShellCommand(input), timeout: timeoutSeconds(input) };
+}
+
+function renderShellAliasCall(args: ShellAliasInput, theme: BashRenderTheme, context: unknown) {
+  const renderContext = context as BashRenderContext;
+  const renderCall = getBashRenderDefinition(renderContext.cwd).renderCall;
+  if (!renderCall) throw new Error("Bash renderer is unavailable");
+  return renderCall(toBashRenderArgs(args), theme, renderContext);
+}
+
+function renderShellAliasResult(
+  result: unknown,
+  options: BashRenderResultOptions,
+  theme: BashRenderResultTheme,
+  context: unknown,
+) {
+  const renderContext = context as BashRenderContext;
+  const renderResult = getBashRenderDefinition(renderContext.cwd).renderResult;
+  if (!renderResult) throw new Error("Bash renderer is unavailable");
+  return renderResult(result as Parameters<BashRenderResult>[0], options, theme, renderContext);
 }
 
 async function resolveWorkdir(ctx: ExtensionContext, workdir: string | undefined): Promise<string | undefined> {
@@ -177,15 +228,7 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
 
 async function runShellAlias(
   id: string,
-  input: {
-    command?: string | string[];
-    cmd?: string | string[];
-    args?: string[];
-    cwd?: string;
-    workdir?: string;
-    timeout?: number;
-    timeout_ms?: number;
-  },
+  input: ShellAliasInput,
   signal: AbortSignal | undefined,
   onUpdate: Parameters<ReturnType<typeof createBashToolDefinition>["execute"]>[3],
   ctx: ExtensionContext,
@@ -215,6 +258,8 @@ function registerCodexAliases(pi: ExtensionAPI): void {
       label: "shell",
       description: "Execute a shell command using Codex compatible arguments.",
       parameters: shellParameters,
+      renderCall: renderShellAliasCall,
+      renderResult: renderShellAliasResult,
       async execute(id, params, signal, onUpdate, ctx) {
         return runShellAlias(id, params, signal, onUpdate, ctx);
       },
@@ -227,6 +272,8 @@ function registerCodexAliases(pi: ExtensionAPI): void {
       label: "shell_command",
       description: "Execute a shell command using Codex shell_command compatible arguments.",
       parameters: shellParameters,
+      renderCall: renderShellAliasCall,
+      renderResult: renderShellAliasResult,
       async execute(id, params, signal, onUpdate, ctx) {
         return runShellAlias(id, params, signal, onUpdate, ctx);
       },
@@ -246,6 +293,8 @@ function registerCodexAliases(pi: ExtensionAPI): void {
         timeout_ms: Type.Optional(Type.Number({ description: "Timeout in milliseconds" })),
         timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
       }),
+      renderCall: renderShellAliasCall,
+      renderResult: renderShellAliasResult,
       async execute(id, params, signal, onUpdate, ctx) {
         return runShellAlias(id, params, signal, onUpdate, ctx);
       },
