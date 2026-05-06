@@ -3,6 +3,10 @@
   "version": "0.1.1",
   "description": "Pi extension package that adapts tool names to the active model family.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yukukotani/pi-model-suitable-tools.git"
+  },
   "module": "index.ts",
   "type": "module",
   "keywords": [
