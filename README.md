@@ -11,7 +11,7 @@ Different model families are trained around different tool shapes. As Cursor not
 Install this package into Pi:
 
 ```bash
-pi install pi-model-suitable-tools
+pi install pi-model-suitable-tool
 ```
 
 For project-local installation, use Pi's local settings flag:
@@ -46,19 +46,3 @@ Run Pi with the extension temporarily during development:
 ```bash
 pi -e ./
 ```
-
-## `apply_patch` Format
-
-```text
-*** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.ts
-@@ function greet
--return "old";
-+return "new";
-*** Delete File: obsolete.txt
-*** End Patch
-```
-
-Absolute paths and paths escaping the working directory are rejected.
