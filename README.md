@@ -8,7 +8,7 @@ Pi Extension that switches model-facing tool names to match the active model fam
 - GPT/Codex models get Codex's default shell shape: `shell_command`, plus `apply_patch`.
 - Alias tools delegate to Pi built-in tools where possible.
 - `apply_patch` is implemented locally with Codex-style patch grammar.
-- `TodoWrite`, `update_plan`, `Task`, `Agent`, and other tools without a matching Pi default tool are intentionally not registered.
+- `shell`, `exec_command`, `TodoWrite`, `update_plan`, `Task`, `Agent`, and other tools without a matching Pi default tool are intentionally not registered.
 
 ## Usage
 

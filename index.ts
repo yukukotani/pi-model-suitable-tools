@@ -28,15 +28,12 @@ import {
 } from "./src/tool-args";
 
 const CLAUDE_ALIAS_TOOLS = ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "LS"];
-const CODEX_ALIAS_TOOLS = ["shell", "shell_command", "exec_command", "apply_patch"];
-const CODEX_PROFILE_TOOLS = ["shell_command", "apply_patch"];
+const CODEX_ALIAS_TOOLS = ["shell_command", "apply_patch"];
 const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const MANAGED_TOOLS = new Set([...CLAUDE_ALIAS_TOOLS, ...CODEX_ALIAS_TOOLS, ...BUILTIN_TOOLS]);
 
 type ShellAliasInput = {
-  command?: string | string[];
-  cmd?: string | string[];
-  args?: string[];
+  command?: string;
   cwd?: string;
   workdir?: string;
   timeout?: number;
@@ -342,7 +339,7 @@ async function runShellAlias(
 
 function registerCodexAliases(pi: ExtensionAPI): void {
   const shellParameters = Type.Object({
-    command: Type.Union([Type.String(), Type.Array(Type.String())], { description: "Command to execute" }),
+    command: Type.String({ description: "The shell script to execute in the user's default shell" }),
     workdir: Type.Optional(Type.String({ description: "Working directory" })),
     cwd: Type.Optional(Type.String({ description: "Working directory" })),
     timeout_ms: Type.Optional(Type.Number({ description: "Timeout in milliseconds" })),
@@ -351,45 +348,10 @@ function registerCodexAliases(pi: ExtensionAPI): void {
 
   pi.registerTool(
     defineTool({
-      name: "shell",
-      label: "shell",
-      description: "Execute a shell command using Codex compatible arguments.",
-      parameters: shellParameters,
-      renderCall: renderShellAliasCall,
-      renderResult: renderShellAliasResult,
-      async execute(id, params, signal, onUpdate, ctx) {
-        return runShellAlias(id, params, signal, onUpdate, ctx);
-      },
-    }),
-  );
-
-  pi.registerTool(
-    defineTool({
       name: "shell_command",
       label: "shell_command",
       description: "Execute a shell command using Codex shell_command compatible arguments.",
       parameters: shellParameters,
-      renderCall: renderShellAliasCall,
-      renderResult: renderShellAliasResult,
-      async execute(id, params, signal, onUpdate, ctx) {
-        return runShellAlias(id, params, signal, onUpdate, ctx);
-      },
-    }),
-  );
-
-  pi.registerTool(
-    defineTool({
-      name: "exec_command",
-      label: "exec_command",
-      description: "Execute a command with optional args using Codex exec_command compatible arguments.",
-      parameters: Type.Object({
-        command: Type.String({ description: "Executable or command" }),
-        args: Type.Optional(Type.Array(Type.String(), { description: "Command arguments" })),
-        workdir: Type.Optional(Type.String({ description: "Working directory" })),
-        cwd: Type.Optional(Type.String({ description: "Working directory" })),
-        timeout_ms: Type.Optional(Type.Number({ description: "Timeout in milliseconds" })),
-        timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
-      }),
       renderCall: renderShellAliasCall,
       renderResult: renderShellAliasResult,
       async execute(id, params, signal, onUpdate, ctx) {
@@ -418,7 +380,7 @@ function registerCodexAliases(pi: ExtensionAPI): void {
 
 function toolsForProfile(profile: ModelProfile): string[] | undefined {
   if (profile === "claude") return CLAUDE_ALIAS_TOOLS;
-  if (profile === "codex") return CODEX_PROFILE_TOOLS;
+  if (profile === "codex") return CODEX_ALIAS_TOOLS;
   return undefined;
 }
 

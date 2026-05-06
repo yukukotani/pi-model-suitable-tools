@@ -118,9 +118,8 @@ describe("apply_patch", () => {
 });
 
 describe("argument adapters", () => {
-  test("maps codex shell command arrays", () => {
-    expect(toShellCommand({ command: ["git", "status", "--short"] })).toBe("git status --short");
-    expect(toShellCommand({ command: "bun", args: ["test", "my spec.ts"] })).toBe("bun test 'my spec.ts'");
+  test("normalizes codex shell_command strings", () => {
+    expect(toShellCommand({ command: " git status --short " })).toBe("git status --short");
   });
 
   test("maps Claude grep fields to Pi grep fields", () => {
@@ -166,6 +165,16 @@ describe("tool registration", () => {
       expect(tool?.renderResult).toBeFunction();
     }
     expect(tools.find((candidate) => candidate.name === "Edit")?.renderShell).toBe("self");
+  });
+
+  test("Codex aliases only register shell_command and apply_patch", () => {
+    const tools = registeredTools();
+    const names = tools.map((tool) => tool.name);
+
+    expect(names).toContain("shell_command");
+    expect(names).toContain("apply_patch");
+    expect(names).not.toContain("shell");
+    expect(names).not.toContain("exec_command");
   });
 
   test("Claude aliases render their alias tool names", () => {

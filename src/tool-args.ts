@@ -61,21 +61,8 @@ export function toGrepArgs(input: {
   };
 }
 
-export function toShellCommand(input: {
-  command?: string | string[];
-  cmd?: string | string[];
-  args?: string[];
-}) {
-  const commandValue = input.command ?? input.cmd ?? "";
-  const command = Array.isArray(commandValue) ? commandValue.map(quoteShellArg).join(" ") : commandValue;
-  const args = Array.isArray(input.args) && input.args.length > 0 ? ` ${input.args.map(quoteShellArg).join(" ")}` : "";
-  const body = `${command}${args}`.trim();
-  return body;
-}
-
-export function quoteShellArg(value: string): string {
-  if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+export function toShellCommand(input: { command?: string }) {
+  return (input.command ?? "").trim();
 }
 
 export function prepareApplyPatchArgs(args: unknown): { input: string } {
