@@ -1,16 +1,22 @@
 {
   "name": "pi-model-optimized-tools",
+  "version": "0.1.0",
+  "description": "Pi extension package that adapts tool names to the active model family.",
   "module": "index.ts",
   "type": "module",
-  "private": true,
-  "devDependencies": {
-    "@types/bun": "latest"
+  "keywords": ["pi-package"],
+  "files": ["index.ts", "src", "README.md"],
+  "pi": {
+    "extensions": ["./index.ts"]
   },
-  "peerDependencies": {
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.0",
+    "@types/bun": "latest",
+    "typebox": "^1.1.37",
     "typescript": "^5"
   },
-  "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.73.0",
-    "typebox": "^1.1.37"
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "typebox": "*"
   }
 }

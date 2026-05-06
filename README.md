@@ -12,13 +12,17 @@ Pi Extension that switches model-facing tool names to match the active model fam
 
 ## Usage
 
-Run Pi with this extension:
+Install this package into Pi:
 
 ```bash
-pi -e ./index.ts
+pi install ./
 ```
 
-Or add it to Pi's extension search path, for example `.pi/extensions/model-optimized-tools.ts`.
+For project-local installation, use Pi's local settings flag:
+
+```bash
+pi install -l ./
+```
 
 ## Development
 
@@ -32,6 +36,12 @@ Run tests:
 
 ```bash
 bun test
+```
+
+Run Pi with the extension temporarily during development:
+
+```bash
+pi -e ./
 ```
 
 ## `apply_patch` Format
