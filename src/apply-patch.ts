@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { link, lstat, mkdir, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { withFileMutationQueue } from "@mariozechner/pi-coding-agent";
+import { isPathInside } from "./path-utils";
 
 export interface ApplyPatchResult {
   changedFiles: string[];
@@ -39,6 +40,8 @@ interface PlannedDelete {
 }
 
 type PlannedChange = PlannedWrite | PlannedDelete;
+
+type UniqueMatch = { kind: "found"; index: number } | { kind: "missing" } | { kind: "ambiguous" };
 
 const BEGIN = "*** Begin Patch";
 const END = "*** End Patch";
@@ -187,6 +190,10 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+function isEnoent(error: unknown): boolean {
+  return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+
 function assertNotAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("Operation aborted");
 }
@@ -226,14 +233,14 @@ function findHeaderStart(lines: string[], header: string | undefined, startAt: n
   return found === -1 ? startAt : found;
 }
 
-function findUniqueMatch(lines: string[], pattern: string[], startAt: number): number {
-  let firstMatch = -1;
+function findUniqueMatch(lines: string[], pattern: string[], startAt: number): UniqueMatch {
+  let firstMatch: number | undefined;
   for (let index = startAt; index <= lines.length - pattern.length; index++) {
     if (!matchesAt(lines, pattern, index)) continue;
-    if (firstMatch !== -1) return -2;
+    if (firstMatch !== undefined) return { kind: "ambiguous" };
     firstMatch = index;
   }
-  return firstMatch;
+  return firstMatch === undefined ? { kind: "missing" } : { kind: "found", index: firstMatch };
 }
 
 function applyUpdateHunks(path: string, content: string, hunks: Hunk[]): string {
@@ -250,11 +257,11 @@ function applyUpdateHunks(path: string, content: string, hunks: Hunk[]): string 
     if (oldLines.length === 0) {
       matchIndex = hunk.endOfFile ? lines.length : searchStart;
     } else {
-      matchIndex = findUniqueMatch(lines, oldLines, searchStart);
+      const match = findUniqueMatch(lines, oldLines, searchStart);
+      if (match.kind === "missing") throw new Error(`Could not find hunk target in ${path}`);
+      if (match.kind === "ambiguous") throw new Error(`Ambiguous hunk target in ${path}`);
+      matchIndex = match.index;
     }
-
-    if (matchIndex === -1) throw new Error(`Could not find hunk target in ${path}`);
-    if (matchIndex === -2) throw new Error(`Ambiguous hunk target in ${path}`);
 
     lines.splice(matchIndex, oldLines.length, ...newLines);
     cursor = matchIndex + newLines.length;
@@ -263,16 +270,22 @@ function applyUpdateHunks(path: string, content: string, hunks: Hunk[]): string 
   return joinContent(lines, parsed.lineEnding, parsed.trailingNewline);
 }
 
-function isInsideCwd(cwdRealPath: string, targetRealPath: string): boolean {
-  const rel = relative(cwdRealPath, targetRealPath);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-async function assertExistingPathInsideCwd(cwdRealPath: string, absolutePath: string, patchPath: string): Promise<void> {
-  const stat = await lstat(absolutePath);
+async function assertExistingPathInsideCwd(
+  cwdRealPath: string,
+  absolutePath: string,
+  patchPath: string,
+  missingMessage: string,
+): Promise<void> {
+  let stat: Awaited<ReturnType<typeof lstat>>;
+  try {
+    stat = await lstat(absolutePath);
+  } catch (error) {
+    if (isEnoent(error)) throw new Error(missingMessage);
+    throw error;
+  }
   if (stat.isSymbolicLink()) throw new Error(`Symlink paths are not allowed: ${patchPath}`);
   const targetRealPath = await realpath(absolutePath);
-  if (!isInsideCwd(cwdRealPath, targetRealPath)) throw new Error(`Path escapes working directory: ${patchPath}`);
+  if (!isPathInside(cwdRealPath, targetRealPath)) throw new Error(`Path escapes working directory: ${patchPath}`);
 }
 
 async function assertCreatablePathInsideCwd(cwdRealPath: string, absolutePath: string, patchPath: string): Promise<void> {
@@ -283,7 +296,7 @@ async function assertCreatablePathInsideCwd(cwdRealPath: string, absolutePath: s
     ancestor = next;
   }
   const ancestorRealPath = await realpath(ancestor);
-  if (!isInsideCwd(cwdRealPath, ancestorRealPath)) throw new Error(`Path escapes working directory: ${patchPath}`);
+  if (!isPathInside(cwdRealPath, ancestorRealPath)) throw new Error(`Path escapes working directory: ${patchPath}`);
 }
 
 async function planChanges(cwd: string, operations: PatchOperation[], signal?: AbortSignal): Promise<PlannedChange[]> {
@@ -316,15 +329,13 @@ async function planChanges(cwd: string, operations: PatchOperation[], signal?: A
     }
 
     if (operation.kind === "delete") {
-      if (!(await fileExists(absolutePath))) throw new Error(`Cannot delete missing file: ${operation.path}`);
-      await assertExistingPathInsideCwd(cwdRealPath, absolutePath, operation.path);
+      await assertExistingPathInsideCwd(cwdRealPath, absolutePath, operation.path, `Cannot delete missing file: ${operation.path}`);
       plannedPaths.add(absolutePath);
       changes.push({ kind: "delete", path: operation.path, absolutePath });
       continue;
     }
 
-    if (!(await fileExists(absolutePath))) throw new Error(`Cannot update missing file: ${operation.path}`);
-    await assertExistingPathInsideCwd(cwdRealPath, absolutePath, operation.path);
+    await assertExistingPathInsideCwd(cwdRealPath, absolutePath, operation.path, `Cannot update missing file: ${operation.path}`);
     const current = await readFile(absolutePath, "utf8");
     assertNotAborted(signal);
     const next = applyUpdateHunks(operation.path, current, operation.hunks);
