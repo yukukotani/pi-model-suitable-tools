@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
@@ -51,11 +51,9 @@ describe("apply_patch", () => {
         dir,
         `*** Begin Patch
 *** Update File: app.ts
-@@ function greet
- function greet() {
+@@ function greet() {
 -  return 'old';
 +  return 'new';
- }
 *** End Patch`,
       );
 
@@ -83,37 +81,281 @@ describe("apply_patch", () => {
     });
   });
 
-  test("rejects symlink update paths", async () => {
+  test("summarizes changes in Codex category order", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "delete.txt"), "delete\n", "utf8");
+      await writeFile(join(dir, "modify.txt"), "old\n", "utf8");
+
+      const result = await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Delete File: delete.txt
+*** Update File: modify.txt
+@@
+-old
++new
+*** Add File: add.txt
++add
+*** End Patch`,
+      );
+
+      expect(result.summary).toBe("Success. Updated the following files:\nA add.txt\nM modify.txt\nD delete.txt\n");
+    });
+  });
+
+  test("updates through symlink paths", async () => {
     await withTempDir(async (dir) => {
       await writeFile(join(dir, "target.txt"), "old\n", "utf8");
       await symlink(join(dir, "target.txt"), join(dir, "link.txt"));
 
-      await expect(
-        applyPatch(
-          dir,
-          `*** Begin Patch
+      await applyPatch(
+        dir,
+        `*** Begin Patch
 *** Update File: link.txt
 @@
 -old
 +new
 *** End Patch`,
-        ),
-      ).rejects.toThrow("Symlink paths are not allowed");
+      );
+
+      expect(await readFile(join(dir, "target.txt"), "utf8")).toBe("new\n");
     });
   });
 
-  test("rejects paths outside cwd", async () => {
+  test("allows paths outside cwd", async () => {
     await withTempDir(async (dir) => {
+      const outside = join(dir, "..", `escape-${Date.now()}.txt`);
+      try {
+        await applyPatch(
+          dir,
+          `*** Begin Patch
+*** Add File: ${outside}
++outside
+*** End Patch`,
+        );
+
+        expect(await readFile(outside, "utf8")).toBe("outside\n");
+      } finally {
+        await rm(outside, { force: true });
+      }
+    });
+  });
+
+  test("overwrites existing add targets", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "duplicate.txt"), "old\n", "utf8");
+
+      const result = await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Add File: duplicate.txt
++new
+*** End Patch`,
+      );
+
+      expect(result.summary).toBe("Success. Updated the following files:\nA duplicate.txt\n");
+      expect(await readFile(join(dir, "duplicate.txt"), "utf8")).toBe("new\n");
+    });
+  });
+
+  test("overwrites existing move destinations", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "old.txt"), "from\n", "utf8");
+      await writeFile(join(dir, "new.txt"), "existing\n", "utf8");
+
+      const result = await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Update File: old.txt
+*** Move to: new.txt
+@@
+-from
++to
+*** End Patch`,
+      );
+
+      expect(result.changedFiles).toEqual(["new.txt"]);
+      expect(await Bun.file(join(dir, "old.txt")).exists()).toBe(false);
+      expect(await readFile(join(dir, "new.txt"), "utf8")).toBe("to\n");
+    });
+  });
+
+  test("rejects moves to the same path", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "same.txt"), "old\n", "utf8");
+
       await expect(
         applyPatch(
           dir,
           `*** Begin Patch
-*** Add File: ../escape.txt
-+nope
+*** Update File: same.txt
+*** Move to: ./same.txt
+@@
+-old
++new
 *** End Patch`,
         ),
-      ).rejects.toThrow("escapes working directory");
+      ).rejects.toThrow("Cannot move file to itself");
+      expect(await readFile(join(dir, "same.txt"), "utf8")).toBe("old\n");
     });
+  });
+
+  test("applies repeated updates to the latest planned contents", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "repeat.txt"), "one\n", "utf8");
+
+      await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Update File: repeat.txt
+@@
+-one
++two
+*** Update File: repeat.txt
+@@
+-two
++three
+*** End Patch`,
+      );
+
+      expect(await readFile(join(dir, "repeat.txt"), "utf8")).toBe("three\n");
+    });
+  });
+
+  test("accepts first update chunk without @@", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "file.txt"), "import foo\n", "utf8");
+
+      await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Update File: file.txt
+ import foo
++bar
+*** End Patch`,
+      );
+
+      expect(await readFile(join(dir, "file.txt"), "utf8")).toBe("import foo\nbar\n");
+    });
+  });
+
+  test("uses fuzzy whitespace and unicode punctuation matching", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "unicode.txt"), "import asyncio  # local import – avoids top‑level dep\n", "utf8");
+
+      await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Update File: unicode.txt
+@@
+-import asyncio  # local import - avoids top-level dep
++import asyncio  # ok
+*** End Patch`,
+      );
+
+      expect(await readFile(join(dir, "unicode.txt"), "utf8")).toBe("import asyncio  # ok\n");
+    });
+  });
+
+  test("appends trailing newline on update", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "no-newline.txt"), "old", "utf8");
+
+      await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Update File: no-newline.txt
+@@
+-old
++new
+*** End Patch`,
+      );
+
+      expect(await readFile(join(dir, "no-newline.txt"), "utf8")).toBe("new\n");
+    });
+  });
+
+  test("anchors hunks at end of file", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "tail.txt"), "first\nlast\n", "utf8");
+
+      await applyPatch(
+        dir,
+        `*** Begin Patch
+*** Update File: tail.txt
+@@
+-last
++end
+*** End of File
+*** End Patch`,
+      );
+
+      expect(await readFile(join(dir, "tail.txt"), "utf8")).toBe("first\nend\n");
+    });
+  });
+
+  test("accepts lenient heredoc wrapped patches", async () => {
+    await withTempDir(async (dir) => {
+      await applyPatch(
+        dir,
+        `<<'EOF'
+*** Begin Patch
+*** Add File: heredoc.txt
++wrapped
+*** End Patch
+EOF`,
+      );
+
+      expect(await readFile(join(dir, "heredoc.txt"), "utf8")).toBe("wrapped\n");
+    });
+  });
+
+  test("rejects move-only updates", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "old.txt"), "same\n", "utf8");
+
+      await expect(
+        applyPatch(
+          dir,
+          `*** Begin Patch
+*** Update File: old.txt
+*** Move to: new.txt
+*** End Patch`,
+        ),
+      ).rejects.toThrow("update must include hunks");
+    });
+  });
+
+  test("rejects empty patches at apply time", async () => {
+    await withTempDir(async (dir) => {
+      expect(parseApplyPatch("*** Begin Patch\n*** End Patch")).toEqual([]);
+      await expect(applyPatch(dir, "*** Begin Patch\n*** End Patch")).rejects.toThrow("No files were modified");
+    });
+  });
+
+  test("rejects directory deletes", async () => {
+    await withTempDir(async (dir) => {
+      await mkdir(join(dir, "subdir"));
+
+      await expect(
+        applyPatch(
+          dir,
+          `*** Begin Patch
+*** Delete File: subdir
+*** End Patch`,
+        ),
+      ).rejects.toThrow("Cannot delete directory");
+    });
+  });
+
+  test("does not extract patches from surrounding prose", () => {
+    expect(() =>
+      parseApplyPatch(`before
+*** Begin Patch
+*** Add File: prose.txt
++nope
+*** End Patch`),
+    ).toThrow("first line");
   });
 });
 

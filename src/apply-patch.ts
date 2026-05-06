@@ -1,8 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { link, lstat, mkdir, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { withFileMutationQueue } from "@mariozechner/pi-coding-agent";
-import { isPathInside } from "./path-utils";
 
 export interface ApplyPatchResult {
   changedFiles: string[];
@@ -27,7 +25,7 @@ type PatchOperation =
 
 interface PlannedWrite {
   kind: "write";
-  mode: "create" | "replace";
+  changeKind: "A" | "M";
   path: string;
   absolutePath: string;
   content: string;
@@ -35,13 +33,14 @@ interface PlannedWrite {
 
 interface PlannedDelete {
   kind: "delete";
+  changeKind: "D";
   path: string;
   absolutePath: string;
+  summarize: boolean;
 }
 
 type PlannedChange = PlannedWrite | PlannedDelete;
-
-type UniqueMatch = { kind: "found"; index: number } | { kind: "missing" } | { kind: "ambiguous" };
+type Match = { kind: "found"; index: number } | { kind: "missing" };
 
 const BEGIN = "*** Begin Patch";
 const END = "*** End Patch";
@@ -51,14 +50,32 @@ const UPDATE = "*** Update File: ";
 const MOVE = "*** Move to: ";
 const EOF_MARKER = "*** End of File";
 
-function stripPatchEnvelope(input: string): string {
-  const normalized = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const begin = normalized.indexOf(BEGIN);
-  const end = normalized.indexOf(END, begin + BEGIN.length);
-  if (begin === -1 || end === -1) {
-    throw new Error("Invalid patch: missing Begin Patch or End Patch marker");
+function normalizedPatchLines(input: string): string[] {
+  const normalized = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  return normalized ? normalized.split("\n") : [];
+}
+
+function strictPatchBodyLines(lines: string[]): string[] {
+  const first = lines[0]?.trim();
+  const last = lines.at(-1)?.trim();
+  if (first !== BEGIN) throw new Error("Invalid patch: The first line of the patch must be '*** Begin Patch'");
+  if (last !== END) throw new Error("Invalid patch: The last line of the patch must be '*** End Patch'");
+  return lines.slice(1, -1);
+}
+
+function patchBodyLines(input: string): string[] {
+  const originalLines = normalizedPatchLines(input);
+  try {
+    return strictPatchBodyLines(originalLines);
+  } catch (originalError) {
+    const first = originalLines[0];
+    const last = originalLines.at(-1);
+    const isHeredoc = first === "<<EOF" || first === "<<'EOF'" || first === '<<"EOF"';
+    if (isHeredoc && last?.endsWith("EOF") && originalLines.length >= 4) {
+      return strictPatchBodyLines(originalLines.slice(1, -1));
+    }
+    throw originalError;
   }
-  return normalized.slice(begin, end + END.length);
 }
 
 function readPath(line: string, marker: string, lineNumber: number): string {
@@ -68,36 +85,86 @@ function readPath(line: string, marker: string, lineNumber: number): string {
 }
 
 function isFileOp(line: string): boolean {
-  return line.startsWith(ADD) || line.startsWith(DELETE) || line.startsWith(UPDATE) || line === END;
+  const trimmed = line.trim();
+  return trimmed.startsWith(ADD) || trimmed.startsWith(DELETE) || trimmed.startsWith(UPDATE) || trimmed === END;
+}
+
+function parseUpdateChunk(
+  lines: string[],
+  startIndex: number,
+  lineNumber: number,
+  allowMissingContext: boolean,
+): { hunk: Hunk; consumed: number } {
+  if (startIndex >= lines.length) throw new Error(`Invalid update hunk line ${lineNumber}: update hunk does not contain any lines`);
+
+  let header: string | undefined;
+  let index = startIndex;
+  if (lines[index] === "@@") {
+    index++;
+  } else if (lines[index]?.startsWith("@@ ")) {
+    header = (lines[index] ?? "").slice(3);
+    index++;
+  } else if (!allowMissingContext) {
+    throw new Error(`Invalid update hunk line ${lineNumber}: expected @@ header`);
+  }
+
+  if (index >= lines.length) {
+    throw new Error(`Invalid update hunk line ${lineNumber + 1}: update hunk does not contain any lines`);
+  }
+
+  const hunkLines: HunkLine[] = [];
+  let endOfFile = false;
+  let parsedLines = 0;
+
+  for (; index < lines.length; index++) {
+    const current = lines[index] ?? "";
+    if (current === EOF_MARKER) {
+      if (parsedLines === 0) {
+        throw new Error(`Invalid update hunk line ${lineNumber + 1}: update hunk does not contain any lines`);
+      }
+      endOfFile = true;
+      parsedLines++;
+      index++;
+      break;
+    }
+
+    const prefix = current[0];
+    if (prefix === undefined) {
+      hunkLines.push({ kind: "context", text: "" });
+    } else if (prefix === " ") {
+      hunkLines.push({ kind: "context", text: current.slice(1) });
+    } else if (prefix === "-") {
+      hunkLines.push({ kind: "remove", text: current.slice(1) });
+    } else if (prefix === "+") {
+      hunkLines.push({ kind: "add", text: current.slice(1) });
+    } else {
+      if (parsedLines === 0) {
+        throw new Error(`Invalid update hunk line ${lineNumber + 1}: expected space, -, or + prefix`);
+      }
+      break;
+    }
+    parsedLines++;
+  }
+
+  return { hunk: { header, lines: hunkLines, endOfFile }, consumed: index - startIndex };
 }
 
 export function parseApplyPatch(input: string): PatchOperation[] {
-  const text = stripPatchEnvelope(input);
-  const lines = text.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  if (lines[0] !== BEGIN) throw new Error("Invalid patch: first line must be Begin Patch");
-  if (lines.at(-1) !== END) throw new Error("Invalid patch: last line must be End Patch");
-
+  const lines = patchBodyLines(input);
   const operations: PatchOperation[] = [];
-  let index = 1;
+  let index = 0;
 
-  while (index < lines.length - 1) {
-    const line = lines[index];
-    const lineNumber = index + 1;
-    if (!line) {
-      index++;
-      continue;
-    }
+  while (index < lines.length) {
+    const line = lines[index]?.trim() ?? "";
+    const lineNumber = index + 2;
 
     if (line.startsWith(ADD)) {
       const path = readPath(line, ADD, lineNumber);
       index++;
       const content: string[] = [];
-      while (index < lines.length - 1 && !isFileOp(lines[index] ?? "")) {
+      while (index < lines.length) {
         const contentLine = lines[index] ?? "";
-        if (!contentLine.startsWith("+")) {
-          throw new Error(`Invalid add file line ${index + 1}: added lines must start with +`);
-        }
+        if (!contentLine.startsWith("+")) break;
         content.push(contentLine.slice(1));
         index++;
       }
@@ -115,49 +182,27 @@ export function parseApplyPatch(input: string): PatchOperation[] {
       const path = readPath(line, UPDATE, lineNumber);
       index++;
       let moveTo: string | undefined;
-      if ((lines[index] ?? "").startsWith(MOVE)) {
-        moveTo = readPath(lines[index] ?? "", MOVE, index + 1);
+      if ((lines[index] ?? "").trim().startsWith(MOVE)) {
+        moveTo = readPath((lines[index] ?? "").trim(), MOVE, index + 2);
         index++;
       }
 
       const hunks: Hunk[] = [];
-      while (index < lines.length - 1 && !isFileOp(lines[index] ?? "")) {
-        const hunkLine = lines[index] ?? "";
-        if (!hunkLine.startsWith("@@")) {
-          throw new Error(`Invalid update hunk line ${index + 1}: expected @@ header`);
-        }
-        const header = hunkLine.slice(2).trim() || undefined;
-        index++;
-        const hunkLines: HunkLine[] = [];
-        let endOfFile = false;
-
-        while (index < lines.length - 1) {
-          const current = lines[index] ?? "";
-          if (current.startsWith("@@") || isFileOp(current)) break;
-          if (current === EOF_MARKER) {
-            endOfFile = true;
-            index++;
-            break;
-          }
-          const prefix = current[0];
-          if (prefix !== " " && prefix !== "-" && prefix !== "+") {
-            throw new Error(`Invalid update hunk line ${index + 1}: expected space, -, or + prefix`);
-          }
-          hunkLines.push({
-            kind: prefix === " " ? "context" : prefix === "-" ? "remove" : "add",
-            text: current.slice(1),
-          });
+      while (index < lines.length) {
+        const current = lines[index] ?? "";
+        if (current.trim() === "") {
           index++;
+          continue;
         }
+        if (isFileOp(current) || current.startsWith("*")) break;
 
-        if (hunkLines.length === 0 && !endOfFile) {
-          throw new Error(`Invalid update hunk line ${lineNumber}: empty hunk`);
-        }
-        hunks.push({ header, lines: hunkLines, endOfFile });
+        const parsed = parseUpdateChunk(lines, index, index + 2, hunks.length === 0);
+        hunks.push(parsed.hunk);
+        index += parsed.consumed;
       }
 
-      if (hunks.length === 0 && !moveTo) {
-        throw new Error(`Invalid update for ${path}: update must include hunks or Move to`);
+      if (hunks.length === 0) {
+        throw new Error(`Invalid update for ${path}: update must include hunks`);
       }
       operations.push({ kind: "update", path, moveTo, hunks });
       continue;
@@ -166,28 +211,11 @@ export function parseApplyPatch(input: string): PatchOperation[] {
     throw new Error(`Invalid patch line ${lineNumber}: expected file operation header`);
   }
 
-  if (operations.length === 0) throw new Error("Invalid patch: no file operations");
   return operations;
 }
 
 function resolvePatchPath(cwd: string, patchPath: string): string {
-  if (isAbsolute(patchPath)) throw new Error(`Absolute paths are not allowed: ${patchPath}`);
-  const absolutePath = resolve(cwd, patchPath);
-  const rel = relative(cwd, absolutePath);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-    throw new Error(`Path escapes working directory: ${patchPath}`);
-  }
-  return absolutePath;
-}
-
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
-    throw error;
-  }
+  return resolve(cwd, patchPath);
 }
 
 function isEnoent(error: unknown): boolean {
@@ -198,17 +226,16 @@ function assertNotAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error("Operation aborted");
 }
 
-function splitContent(content: string): { lines: string[]; lineEnding: string; trailingNewline: boolean } {
-  const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
-  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const trailingNewline = normalized.endsWith("\n");
-  const body = trailingNewline ? normalized.slice(0, -1) : normalized;
-  return { lines: body ? body.split("\n") : [], lineEnding, trailingNewline };
+function splitContent(content: string): string[] {
+  const lines = content.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
 }
 
-function joinContent(lines: string[], lineEnding: string, trailingNewline: boolean): string {
-  const body = lines.join(lineEnding);
-  return trailingNewline && lines.length > 0 ? `${body}${lineEnding}` : body;
+function joinContent(lines: string[]): string {
+  const next = [...lines];
+  if (next.at(-1) !== "") next.push("");
+  return next.join("\n");
 }
 
 function hunkOldLines(hunk: Hunk): string[] {
@@ -227,159 +254,166 @@ function matchesAt(lines: string[], pattern: string[], index: number): boolean {
   return true;
 }
 
-function findHeaderStart(lines: string[], header: string | undefined, startAt: number): number {
+function findHeaderStart(path: string, lines: string[], header: string | undefined, startAt: number): number {
   if (!header) return startAt;
-  const found = lines.findIndex((line, index) => index >= startAt && line.includes(header));
-  return found === -1 ? startAt : found;
+  const match = findMatch(lines, [header], startAt, false);
+  if (match.kind === "missing") throw new Error(`Failed to find context '${header}' in ${path}`);
+  return match.index + 1;
 }
 
-function findUniqueMatch(lines: string[], pattern: string[], startAt: number): UniqueMatch {
-  let firstMatch: number | undefined;
-  for (let index = startAt; index <= lines.length - pattern.length; index++) {
-    if (!matchesAt(lines, pattern, index)) continue;
-    if (firstMatch !== undefined) return { kind: "ambiguous" };
-    firstMatch = index;
+function normalizeUnicodePunctuation(value: string): string {
+  return value
+    .trim()
+    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u00A0\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u202F\u205F\u3000]/g, " ");
+}
+
+function findMatch(lines: string[], pattern: string[], startAt: number, endOfFile: boolean): Match {
+  if (pattern.length === 0) return { kind: "found", index: startAt };
+  if (pattern.length > lines.length) return { kind: "missing" };
+
+  const searchStart = endOfFile && lines.length >= pattern.length ? lines.length - pattern.length : startAt;
+  const normalizers = [(value: string) => value, (value: string) => value.trimEnd(), (value: string) => value.trim(), normalizeUnicodePunctuation];
+  for (const normalize of normalizers) {
+    const normalizedLines = lines.map(normalize);
+    const normalizedPattern = pattern.map(normalize);
+    for (let index = searchStart; index <= lines.length - pattern.length; index++) {
+      if (matchesAt(normalizedLines, normalizedPattern, index)) return { kind: "found", index };
+    }
   }
-  return firstMatch === undefined ? { kind: "missing" } : { kind: "found", index: firstMatch };
+  return { kind: "missing" };
 }
 
 function applyUpdateHunks(path: string, content: string, hunks: Hunk[]): string {
-  const parsed = splitContent(content);
-  const lines = [...parsed.lines];
-  let cursor = 0;
+  const originalLines = splitContent(content);
+  const replacements: Array<{ start: number; oldLength: number; newLines: string[] }> = [];
+  let lineIndex = 0;
 
   for (const hunk of hunks) {
-    const oldLines = hunkOldLines(hunk);
-    const newLines = hunkNewLines(hunk);
-    const searchStart = hunk.endOfFile ? Math.max(0, lines.length - oldLines.length) : findHeaderStart(lines, hunk.header, cursor);
-    let matchIndex: number;
+    lineIndex = findHeaderStart(path, originalLines, hunk.header, lineIndex);
+    let oldLines = hunkOldLines(hunk);
+    let newLines = hunkNewLines(hunk);
 
     if (oldLines.length === 0) {
-      matchIndex = hunk.endOfFile ? lines.length : searchStart;
-    } else {
-      const match = findUniqueMatch(lines, oldLines, searchStart);
-      if (match.kind === "missing") throw new Error(`Could not find hunk target in ${path}`);
-      if (match.kind === "ambiguous") throw new Error(`Ambiguous hunk target in ${path}`);
-      matchIndex = match.index;
+      replacements.push({ start: originalLines.length, oldLength: 0, newLines });
+      continue;
     }
 
-    lines.splice(matchIndex, oldLines.length, ...newLines);
-    cursor = matchIndex + newLines.length;
+    let match = findMatch(originalLines, oldLines, lineIndex, hunk.endOfFile);
+    if (match.kind === "missing" && oldLines.at(-1) === "") {
+      oldLines = oldLines.slice(0, -1);
+      if (newLines.at(-1) === "") newLines = newLines.slice(0, -1);
+      match = findMatch(originalLines, oldLines, lineIndex, hunk.endOfFile);
+    }
+
+    if (match.kind === "missing") {
+      throw new Error(`Failed to find expected lines in ${path}:\n${hunkOldLines(hunk).join("\n")}`);
+    }
+
+    replacements.push({ start: match.index, oldLength: oldLines.length, newLines });
+    lineIndex = match.index + oldLines.length;
   }
 
-  return joinContent(lines, parsed.lineEnding, parsed.trailingNewline);
+  const lines = [...originalLines];
+  replacements.sort((left, right) => left.start - right.start);
+  for (const replacement of replacements.reverse()) {
+    lines.splice(replacement.start, replacement.oldLength, ...replacement.newLines);
+  }
+  return joinContent(lines);
 }
 
-async function assertExistingPathInsideCwd(
-  cwdRealPath: string,
-  absolutePath: string,
-  patchPath: string,
-  missingMessage: string,
-): Promise<void> {
-  let stat: Awaited<ReturnType<typeof lstat>>;
+async function assertDeletableFile(absolutePath: string, patchPath: string): Promise<void> {
+  let metadata: Awaited<ReturnType<typeof stat>>;
   try {
-    stat = await lstat(absolutePath);
+    metadata = await stat(absolutePath);
   } catch (error) {
-    if (isEnoent(error)) throw new Error(missingMessage);
+    if (isEnoent(error)) throw new Error(`Cannot delete missing file: ${patchPath}`);
     throw error;
   }
-  if (stat.isSymbolicLink()) throw new Error(`Symlink paths are not allowed: ${patchPath}`);
-  const targetRealPath = await realpath(absolutePath);
-  if (!isPathInside(cwdRealPath, targetRealPath)) throw new Error(`Path escapes working directory: ${patchPath}`);
+  if (metadata.isDirectory()) throw new Error(`Cannot delete directory: ${patchPath}`);
 }
 
-async function assertCreatablePathInsideCwd(cwdRealPath: string, absolutePath: string, patchPath: string): Promise<void> {
-  let ancestor = dirname(absolutePath);
-  while (!(await fileExists(ancestor))) {
-    const next = dirname(ancestor);
-    if (next === ancestor) throw new Error(`Cannot resolve parent directory for: ${patchPath}`);
-    ancestor = next;
+async function readUpdateFile(absolutePath: string, patchPath: string): Promise<string> {
+  try {
+    return await readFile(absolutePath, "utf8");
+  } catch (error) {
+    if (isEnoent(error)) throw new Error(`Cannot update missing file: ${patchPath}`);
+    throw error;
   }
-  const ancestorRealPath = await realpath(ancestor);
-  if (!isPathInside(cwdRealPath, ancestorRealPath)) throw new Error(`Path escapes working directory: ${patchPath}`);
+}
+
+async function realpathIfExists(path: string): Promise<string | undefined> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if (isEnoent(error)) return undefined;
+    throw error;
+  }
 }
 
 async function planChanges(cwd: string, operations: PatchOperation[], signal?: AbortSignal): Promise<PlannedChange[]> {
-  const changes: PlannedChange[] = [];
-  const plannedPaths = new Set<string>();
-  const cwdRealPath = await realpath(cwd);
+  if (operations.length === 0) throw new Error("No files were modified.");
 
+  const changes: PlannedChange[] = [];
+  const pendingContent = new Map<string, string | null>();
   for (const operation of operations) {
     assertNotAborted(signal);
     const absolutePath = resolvePatchPath(cwd, operation.path);
 
-    if (plannedPaths.has(absolutePath)) {
-      throw new Error(`Patch modifies the same path more than once: ${operation.path}`);
-    }
-
     if (operation.kind === "add") {
-      if (await fileExists(absolutePath)) {
-        throw new Error(`Cannot add file that already exists: ${operation.path}`);
-      }
-      await assertCreatablePathInsideCwd(cwdRealPath, absolutePath, operation.path);
-      plannedPaths.add(absolutePath);
+      const content = operation.lines.length === 0 ? "" : `${operation.lines.join("\n")}\n`;
+      pendingContent.set(absolutePath, content);
       changes.push({
         kind: "write",
-        mode: "create",
+        changeKind: "A",
         path: operation.path,
         absolutePath,
-        content: operation.lines.length === 0 ? "" : `${operation.lines.join("\n")}\n`,
+        content,
       });
       continue;
     }
 
     if (operation.kind === "delete") {
-      await assertExistingPathInsideCwd(cwdRealPath, absolutePath, operation.path, `Cannot delete missing file: ${operation.path}`);
-      plannedPaths.add(absolutePath);
-      changes.push({ kind: "delete", path: operation.path, absolutePath });
+      if (pendingContent.get(absolutePath) === null) throw new Error(`Cannot delete missing file: ${operation.path}`);
+      if (!pendingContent.has(absolutePath)) await assertDeletableFile(absolutePath, operation.path);
+      pendingContent.set(absolutePath, null);
+      changes.push({ kind: "delete", changeKind: "D", path: operation.path, absolutePath, summarize: true });
       continue;
     }
 
-    await assertExistingPathInsideCwd(cwdRealPath, absolutePath, operation.path, `Cannot update missing file: ${operation.path}`);
-    const current = await readFile(absolutePath, "utf8");
+    const pending = pendingContent.get(absolutePath);
+    if (pending === null) throw new Error(`Cannot update missing file: ${operation.path}`);
+    const current = pending ?? (await readUpdateFile(absolutePath, operation.path));
     assertNotAborted(signal);
-    const next = applyUpdateHunks(operation.path, current, operation.hunks);
     const targetPath = operation.moveTo ?? operation.path;
     const targetAbsolutePath = resolvePatchPath(cwd, targetPath);
-    if (operation.moveTo && plannedPaths.has(targetAbsolutePath)) {
-      throw new Error(`Patch modifies the same path more than once: ${operation.moveTo}`);
+    if (operation.moveTo && targetAbsolutePath === absolutePath) {
+      throw new Error(`Cannot move file to itself: ${operation.path}`);
     }
-    if (operation.moveTo && (await fileExists(targetAbsolutePath))) {
-      throw new Error(`Cannot move to existing file: ${operation.moveTo}`);
-    }
-    if (operation.moveTo) await assertCreatablePathInsideCwd(cwdRealPath, targetAbsolutePath, operation.moveTo);
-    plannedPaths.add(absolutePath);
-    plannedPaths.add(targetAbsolutePath);
+    const content = applyUpdateHunks(operation.path, current, operation.hunks);
+    pendingContent.set(targetAbsolutePath, content);
     changes.push({
       kind: "write",
-      mode: operation.moveTo ? "create" : "replace",
+      changeKind: "M",
       path: targetPath,
       absolutePath: targetAbsolutePath,
-      content: next,
+      content,
     });
-    if (operation.moveTo) changes.push({ kind: "delete", path: operation.path, absolutePath });
+    if (operation.moveTo) {
+      if (!pendingContent.has(absolutePath)) await assertDeletableFile(absolutePath, operation.path);
+      pendingContent.set(absolutePath, null);
+      changes.push({ kind: "delete", changeKind: "D", path: operation.path, absolutePath, summarize: false });
+    }
   }
-
   return changes;
 }
 
-async function writeAtomic(change: PlannedWrite, signal?: AbortSignal): Promise<void> {
+async function writeChange(change: PlannedWrite, signal?: AbortSignal): Promise<void> {
   assertNotAborted(signal);
   await mkdir(dirname(change.absolutePath), { recursive: true });
-  const tempPath = resolve(dirname(change.absolutePath), `.tmp-${randomUUID()}`);
-  try {
-    await writeFile(tempPath, change.content, { encoding: "utf8", flag: "wx" });
-    assertNotAborted(signal);
-    if (change.mode === "create") {
-      await link(tempPath, change.absolutePath);
-      await unlink(tempPath);
-    } else {
-      await rename(tempPath, change.absolutePath);
-    }
-  } catch (error) {
-    await rm(tempPath, { force: true });
-    throw error;
-  }
+  await writeFile(change.absolutePath, change.content, { encoding: "utf8" });
 }
 
 async function withMutationQueues(paths: string[], fn: () => Promise<void>): Promise<void> {
@@ -388,35 +422,50 @@ async function withMutationQueues(paths: string[], fn: () => Promise<void>): Pro
   return withFileMutationQueue(first, () => withMutationQueues(rest, fn));
 }
 
-function operationPaths(cwd: string, operations: PatchOperation[]): string[] {
+async function operationPaths(cwd: string, operations: PatchOperation[]): Promise<string[]> {
   const paths: string[] = [];
   for (const operation of operations) {
-    paths.push(resolvePatchPath(cwd, operation.path));
-    if (operation.kind === "update" && operation.moveTo) paths.push(resolvePatchPath(cwd, operation.moveTo));
+    const absolutePath = resolvePatchPath(cwd, operation.path);
+    const realPath = await realpathIfExists(absolutePath);
+    paths.push(realPath ?? absolutePath);
+    if (operation.kind === "update" && operation.moveTo) {
+      const targetAbsolutePath = resolvePatchPath(cwd, operation.moveTo);
+      const targetRealPath = await realpathIfExists(targetAbsolutePath);
+      paths.push(targetRealPath ?? targetAbsolutePath);
+    }
   }
   return paths;
 }
 
+function summarizedChanges(changes: PlannedChange[]): PlannedChange[] {
+  return changes.filter((change) => change.kind === "write" || change.summarize);
+}
+
+function summaryForChanges(changes: PlannedChange[]): string {
+  const lines = ["Success. Updated the following files:"];
+  const visible = summarizedChanges(changes);
+  for (const changeKind of ["A", "M", "D"] as const) {
+    for (const change of visible) {
+      if (change.changeKind === changeKind) lines.push(`${change.changeKind} ${change.path}`);
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 export async function applyPatch(cwd: string, input: string, signal?: AbortSignal): Promise<ApplyPatchResult> {
   const operations = parseApplyPatch(input);
-  const paths = operationPaths(cwd, operations);
+  const paths = await operationPaths(cwd, operations);
   let changes: PlannedChange[] = [];
 
   await withMutationQueues(paths, async () => {
     changes = await planChanges(cwd, operations, signal);
     for (const change of changes) {
       assertNotAborted(signal);
-      if (change.kind === "delete") {
-        await rm(change.absolutePath, { force: false });
-      } else {
-        await writeAtomic(change, signal);
-      }
+      if (change.kind === "delete") await rm(change.absolutePath, { force: false });
+      else await writeChange(change, signal);
     }
   });
 
-  const changedFiles = [...new Set(changes.map((change) => change.path))];
-  return {
-    changedFiles,
-    summary: `Applied patch to ${changedFiles.length} file(s): ${changedFiles.join(", ")}`,
-  };
+  const changedFiles = [...new Set(summarizedChanges(changes).map((change) => change.path))];
+  return { changedFiles, summary: summaryForChanges(changes) };
 }
