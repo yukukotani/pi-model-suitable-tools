@@ -9,6 +9,8 @@ import {
   defineTool,
   type ExtensionAPI,
   type ExtensionContext,
+  type ToolDefinition,
+  type ToolRenderResultOptions,
 } from "@mariozechner/pi-coding-agent";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -42,14 +44,16 @@ type ShellAliasInput = {
 };
 
 type BashToolDefinition = ReturnType<typeof createBashToolDefinition>;
-type BashRenderCall = NonNullable<BashToolDefinition["renderCall"]>;
-type BashRenderResult = NonNullable<BashToolDefinition["renderResult"]>;
-type BashRenderContext = Parameters<BashRenderCall>[2];
-type BashRenderTheme = Parameters<BashRenderCall>[1];
-type BashRenderResultOptions = Parameters<BashRenderResult>[1];
-type BashRenderResultTheme = Parameters<BashRenderResult>[2];
+type AnyToolDefinition = ToolDefinition<any, any, any>;
+type BuiltinToolName = "read" | "edit" | "write" | "bash" | "grep" | "find" | "ls";
+type RenderContext = {
+  args: any;
+  cwd: string;
+  [key: string]: any;
+};
+type RenderTheme = Parameters<NonNullable<BashToolDefinition["renderCall"]>>[1];
 
-const bashRenderDefinitions = new Map<string, BashToolDefinition>();
+const renderDefinitions = new Map<string, AnyToolDefinition>();
 
 function timeoutSeconds(input: { timeout?: number; timeout_ms?: number }): number | undefined {
   if (typeof input.timeout === "number") return input.timeout;
@@ -57,11 +61,31 @@ function timeoutSeconds(input: { timeout?: number; timeout_ms?: number }): numbe
   return undefined;
 }
 
-function getBashRenderDefinition(cwd: string): BashToolDefinition {
-  const existing = bashRenderDefinitions.get(cwd);
+function createBuiltinRenderDefinition(name: BuiltinToolName, cwd: string): AnyToolDefinition {
+  switch (name) {
+    case "read":
+      return createReadToolDefinition(cwd);
+    case "edit":
+      return createEditToolDefinition(cwd);
+    case "write":
+      return createWriteToolDefinition(cwd);
+    case "bash":
+      return createBashToolDefinition(cwd);
+    case "grep":
+      return createGrepToolDefinition(cwd);
+    case "find":
+      return createFindToolDefinition(cwd);
+    case "ls":
+      return createLsToolDefinition(cwd);
+  }
+}
+
+function getRenderDefinition(name: BuiltinToolName, cwd: string): AnyToolDefinition {
+  const key = `${name}:${cwd}`;
+  const existing = renderDefinitions.get(key);
   if (existing) return existing;
-  const definition = createBashToolDefinition(cwd);
-  bashRenderDefinitions.set(cwd, definition);
+  const definition = createBuiltinRenderDefinition(name, cwd);
+  renderDefinitions.set(key, definition);
   return definition;
 }
 
@@ -69,23 +93,74 @@ function toBashRenderArgs(input: ShellAliasInput): { command: string; timeout?: 
   return { command: toShellCommand(input), timeout: timeoutSeconds(input) };
 }
 
-function renderShellAliasCall(args: ShellAliasInput, theme: BashRenderTheme, context: unknown) {
-  const renderContext = context as BashRenderContext;
-  const renderCall = getBashRenderDefinition(renderContext.cwd).renderCall;
-  if (!renderCall) throw new Error("Bash renderer is unavailable");
-  return renderCall(toBashRenderArgs(args), theme, renderContext);
+function withRenderArgs(context: unknown, args: unknown): RenderContext {
+  return { ...(context as RenderContext), args };
 }
 
-function renderShellAliasResult(
-  result: unknown,
-  options: BashRenderResultOptions,
-  theme: BashRenderResultTheme,
+function replaceRenderedTitle(text: string, builtinName: BuiltinToolName, aliasLabel: string): string {
+  return aliasLabel === builtinName ? text : text.replace(builtinName, aliasLabel);
+}
+
+function applyAliasToolTitle(component: unknown, builtinName: BuiltinToolName, aliasLabel: string): void {
+  if (aliasLabel === builtinName || !component || typeof component !== "object") return;
+  const target = component as { text?: unknown; setText?: (text: string) => void; children?: unknown[]; invalidate?: () => void };
+  if (typeof target.text === "string") {
+    const next = replaceRenderedTitle(target.text, builtinName, aliasLabel);
+    if (next !== target.text) {
+      if (typeof target.setText === "function") target.setText(next);
+      else target.text = next;
+    }
+    return;
+  }
+  for (const child of target.children ?? []) applyAliasToolTitle(child, builtinName, aliasLabel);
+  target.invalidate?.();
+}
+
+function renderAliasCall(
+  name: BuiltinToolName,
+  args: unknown,
+  theme: RenderTheme,
   context: unknown,
+  aliasLabel: string = name,
 ) {
-  const renderContext = context as BashRenderContext;
-  const renderResult = getBashRenderDefinition(renderContext.cwd).renderResult;
-  if (!renderResult) throw new Error("Bash renderer is unavailable");
-  return renderResult(result as Parameters<BashRenderResult>[0], options, theme, renderContext);
+  const renderContext = context as RenderContext;
+  const renderCall = getRenderDefinition(name, renderContext.cwd).renderCall;
+  if (!renderCall) throw new Error(`${name} renderer is unavailable`);
+  const component = renderCall(args, theme, withRenderArgs(renderContext, args) as any);
+  applyAliasToolTitle(component, name, aliasLabel);
+  return component;
+}
+
+function renderAliasResult(
+  name: BuiltinToolName,
+  args: unknown,
+  result: unknown,
+  options: ToolRenderResultOptions,
+  theme: RenderTheme,
+  context: unknown,
+  aliasLabel: string = name,
+) {
+  const renderContext = context as RenderContext;
+  const renderResult = getRenderDefinition(name, renderContext.cwd).renderResult;
+  if (!renderResult) throw new Error(`${name} renderer is unavailable`);
+  const component = renderResult(
+    result as Parameters<NonNullable<AnyToolDefinition["renderResult"]>>[0],
+    options,
+    theme,
+    withRenderArgs(renderContext, args) as any,
+  );
+  applyAliasToolTitle((renderContext.state as { callComponent?: unknown } | undefined)?.callComponent, name, aliasLabel);
+  applyAliasToolTitle(component, name, aliasLabel);
+  return component;
+}
+
+function renderShellAliasCall(args: ShellAliasInput, theme: RenderTheme, context: unknown) {
+  return renderAliasCall("bash", toBashRenderArgs(args), theme, context);
+}
+
+function renderShellAliasResult(result: unknown, options: ToolRenderResultOptions, theme: RenderTheme, context: unknown) {
+  const args = toBashRenderArgs((context as RenderContext).args as ShellAliasInput);
+  return renderAliasResult("bash", args, result, options, theme, context);
 }
 
 async function resolveWorkdir(ctx: ExtensionContext, workdir: string | undefined): Promise<string | undefined> {
@@ -109,6 +184,9 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
         offset: Type.Optional(Type.Number({ description: "Line number to start reading from" })),
         limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
       }),
+      renderCall: (params, theme, context) => renderAliasCall("read", toReadArgs(params), theme, context, "Read"),
+      renderResult: (result, options, theme, context) =>
+        renderAliasResult("read", toReadArgs(context.args), result, options, theme, context, "Read"),
       async execute(id, params, signal, onUpdate, ctx) {
         return createReadToolDefinition(ctx.cwd).execute(id, toReadArgs(params), signal, onUpdate, ctx);
       },
@@ -126,6 +204,10 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
         new_string: Type.String({ description: "Replacement text" }),
         replace_all: Type.Optional(Type.Boolean({ description: "Not supported by this adapter" })),
       }),
+      renderShell: "self",
+      renderCall: (params, theme, context) => renderAliasCall("edit", toEditArgs(params), theme, context, "Edit"),
+      renderResult: (result, options, theme, context) =>
+        renderAliasResult("edit", toEditArgs(context.args), result, options, theme, context, "Edit"),
       async execute(id, params, signal, onUpdate, ctx) {
         if (params.replace_all) throw new Error("Edit.replace_all is not supported by the Pi edit adapter");
         return createEditToolDefinition(ctx.cwd).execute(id, toEditArgs(params), signal, onUpdate, ctx);
@@ -142,6 +224,9 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
         file_path: Type.String({ description: "Path to the file to write" }),
         content: Type.String({ description: "Complete file contents" }),
       }),
+      renderCall: (params, theme, context) => renderAliasCall("write", toWriteArgs(params), theme, context, "Write"),
+      renderResult: (result, options, theme, context) =>
+        renderAliasResult("write", toWriteArgs(context.args), result, options, theme, context, "Write"),
       async execute(id, params, signal, onUpdate, ctx) {
         return createWriteToolDefinition(ctx.cwd).execute(id, toWriteArgs(params), signal, onUpdate, ctx);
       },
@@ -159,6 +244,9 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
         timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
         run_in_background: Type.Optional(Type.Boolean({ description: "Runs through the shell when true" })),
       }),
+      renderCall: (params, theme, context) => renderAliasCall("bash", toBashRenderArgs(params), theme, context, "Bash"),
+      renderResult: (result, options, theme, context) =>
+        renderAliasResult("bash", toBashRenderArgs(context.args), result, options, theme, context, "Bash"),
       async execute(id, params, signal, onUpdate, ctx) {
         if (params.run_in_background) throw new Error("Bash.run_in_background is not supported by this adapter");
         return createBashToolDefinition(ctx.cwd).execute(
@@ -189,6 +277,9 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
         max_count: Type.Optional(Type.Number({ description: "Maximum matches" })),
         limit: Type.Optional(Type.Number({ description: "Maximum matches" })),
       }),
+      renderCall: (params, theme, context) => renderAliasCall("grep", toGrepArgs(params), theme, context, "Grep"),
+      renderResult: (result, options, theme, context) =>
+        renderAliasResult("grep", toGrepArgs(context.args), result, options, theme, context, "Grep"),
       async execute(id, params, signal, onUpdate, ctx) {
         return createGrepToolDefinition(ctx.cwd).execute(id, toGrepArgs(params), signal, onUpdate, ctx);
       },
@@ -204,6 +295,9 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
         pattern: Type.String({ description: "Glob pattern" }),
         path: Type.Optional(Type.String({ description: "Directory to search" })),
       }),
+      renderCall: (params, theme, context) => renderAliasCall("find", params, theme, context, "Glob"),
+      renderResult: (result, options, theme, context) =>
+        renderAliasResult("find", context.args, result, options, theme, context, "Glob"),
       async execute(id, params, signal, onUpdate, ctx) {
         return createFindToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
       },
@@ -219,6 +313,9 @@ function registerClaudeAliases(pi: ExtensionAPI): void {
         path: Type.Optional(Type.String({ description: "Directory to list" })),
         limit: Type.Optional(Type.Number({ description: "Maximum entries" })),
       }),
+      renderCall: (params, theme, context) => renderAliasCall("ls", params, theme, context, "LS"),
+      renderResult: (result, options, theme, context) =>
+        renderAliasResult("ls", context.args, result, options, theme, context, "LS"),
       async execute(id, params, signal, onUpdate, ctx) {
         return createLsToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);
       },

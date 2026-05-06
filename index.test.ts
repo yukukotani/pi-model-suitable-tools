@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
-import { applyPatch, parseApplyPatch, prepareApplyPatchArgs, toGrepArgs, toShellCommand } from "./index";
+import modelOptimizedTools, { applyPatch, parseApplyPatch, prepareApplyPatchArgs, toGrepArgs, toShellCommand } from "./index";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "pi-model-tools-"));
@@ -138,5 +138,68 @@ describe("argument adapters", () => {
   test("normalizes apply_patch arguments", () => {
     expect(prepareApplyPatchArgs("patch")).toEqual({ input: "patch" });
     expect(prepareApplyPatchArgs({ patch: "patch" })).toEqual({ input: "patch" });
+  });
+});
+
+describe("tool registration", () => {
+  function registeredTools() {
+    const tools: Array<{ name: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }> = [];
+    modelOptimizedTools({
+      registerTool(tool: { name: string; renderCall?: unknown; renderResult?: unknown; renderShell?: unknown }) {
+        tools.push(tool);
+      },
+      getActiveTools() {
+        return [];
+      },
+      setActiveTools() {},
+      on() {},
+    } as any);
+    return tools;
+  }
+
+  test("Claude aliases reuse built-in renderers", () => {
+    const tools = registeredTools();
+
+    for (const name of ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "LS"]) {
+      const tool = tools.find((candidate) => candidate.name === name);
+      expect(tool?.renderCall).toBeFunction();
+      expect(tool?.renderResult).toBeFunction();
+    }
+    expect(tools.find((candidate) => candidate.name === "Edit")?.renderShell).toBe("self");
+  });
+
+  test("Claude aliases render their alias tool names", () => {
+    const tools = registeredTools();
+    const theme = {
+      fg: (_name: string, text: string) => text,
+      bg: (_name: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const context = {
+      cwd: process.cwd(),
+      args: {},
+      toolCallId: "test",
+      invalidate() {},
+      lastComponent: undefined,
+      state: {},
+      executionStarted: false,
+      argsComplete: true,
+      isPartial: false,
+      expanded: false,
+      showImages: true,
+      isError: false,
+    };
+
+    const cases = [
+      { name: "Read", args: { file_path: "package.json" }, expected: "Read package.json" },
+      { name: "Glob", args: { pattern: "*.ts" }, expected: "Glob *.ts" },
+      { name: "LS", args: { path: "." }, expected: "LS ." },
+    ];
+
+    for (const item of cases) {
+      const tool = tools.find((candidate) => candidate.name === item.name);
+      const component = (tool?.renderCall as any)(item.args, theme, { ...context, args: item.args });
+      expect(component.render(120).join("\n")).toContain(item.expected);
+    }
   });
 });
